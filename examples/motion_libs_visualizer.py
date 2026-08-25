@@ -34,9 +34,9 @@ parser.add_argument(
 parser.add_argument(
     "--robot",
     type=str,
-    choices=["g1", "rigv1", "h1_2", "smpl", "soma23"],
+    choices=["g1", "g1_23dof", "rigv1", "h1_2", "smpl", "soma23"],
     default="g1",
-    help="Robot to load (g1, rigv1, h1_2, smpl, or soma23)",
+    help="Robot to load (g1, g1_23dof, rigv1, h1_2, smpl, or soma23)",
 )
 parser.add_argument("--headless", action="store_true", help="Run in headless mode")
 parser.add_argument(
@@ -126,6 +126,9 @@ class RobotSpec:
 # Define robot specifications
 ROBOT_SPECS = {
     "g1": RobotSpec(
+        viz_bodies=[],
+    ),
+    "g1_23dof": RobotSpec(
         viz_bodies=[],
     ),
     "rigv1": RobotSpec(
