@@ -57,6 +57,41 @@ adjust ranges to suit your robot and deployment conditions.
        dof_names=[".*"],  # Apply to all joints
    )
 
+**Actuator Randomization:**
+
+Randomizes PD gains and effort limits with multiplicative scale factors sampled
+independently per environment and joint. Values are resampled at reset by
+default. IsaacLab supports these scales with built-in PD; explicit PD and
+torque controllers apply the scales in the common base controller.
+
+.. code-block:: python
+
+   ActuatorDomainRandomizationConfig(
+       stiffness_scale_range=(0.90, 1.10),
+       damping_scale_range=(0.85, 1.15),
+       effort_limit_scale_range=(0.85, 1.15),
+       dof_names=[".*"],
+       resample_on_reset=True,
+   )
+
+**Control Latency Randomization:**
+
+Adds an integer action delay sampled independently per environment. The range is
+inclusive and expressed in policy control steps, not physics substeps. A delay
+of one step is 20 ms for a 50 Hz policy. On reset, the delay buffer is seeded
+with the reset pose so position-controlled robots do not receive a zero target.
+
+.. code-block:: python
+
+   ControlLatencyDomainRandomizationConfig(
+       delay_steps_range=(0, 1),
+       resample_on_reset=True,
+   )
+
+The policy's previous-action history remains undelayed; only the command sent to
+the simulated actuator is delayed. This matches deployments that retain the
+issued policy action in their observation history.
+
 **Friction Randomization:**
 
 .. code-block:: python

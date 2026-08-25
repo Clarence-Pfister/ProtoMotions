@@ -201,6 +201,12 @@ class PPO(BaseAgent):
         if require_optimizers or "critic_optimizer" in state_dict:
             self.critic_optimizer.load_state_dict(state_dict["critic_optimizer"])
 
+        if not self.config.adaptive_lr.enabled:
+            for param_group in self.actor_optimizer.param_groups:
+                param_group["lr"] = self.config.model.actor_optimizer.lr
+            for param_group in self.critic_optimizer.param_groups:
+                param_group["lr"] = self.config.model.critic_optimizer.lr
+
         # Restore adaptive LR state
         if self.config.adaptive_lr.enabled and "adaptive_lr" in state_dict:
             old_actor_lr = getattr(

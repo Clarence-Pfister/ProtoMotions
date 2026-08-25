@@ -41,6 +41,7 @@ from protomotions.simulator.base_simulator.config import (
     SimBodyOrdering,
     ProjectileConfig,
 )
+from protomotions.robot_configs.base import ControlType
 from protomotions.simulator.base_simulator.simulator_state import (
     RobotState,
     RootOnlyState,
@@ -506,6 +507,56 @@ class IsaacLabSimulator(Simulator):
             self._robot.root_physx_view.set_coms(coms, all_env_ids)
 
         self._apply_scene_object_properties_after_spawn(all_env_ids)
+
+    def _apply_actuator_domain_randomization(self, env_ids: torch.Tensor) -> None:
+        """Write per-environment built-in PD properties to IsaacLab/PhysX."""
+        actuator_dr = self._get_actuator_domain_randomization()
+        if actuator_dr is None or self.control_type != ControlType.BUILT_IN_PD:
+            return
+
+        common_dof_ids = torch.as_tensor(
+            actuator_dr["dof_indices"], device=self.device, dtype=torch.long
+        )
+        simulator_dof_ids = self.data_conversion.dof_convert_to_common[
+            common_dof_ids
+        ]
+        env_ids = env_ids.to(device=self.device, dtype=torch.long)
+        stiffness = self._common_p_gains[common_dof_ids] * actuator_dr[
+            "stiffness_scale"
+        ][env_ids[:, None], common_dof_ids]
+        damping = self._common_d_gains[common_dof_ids] * actuator_dr[
+            "damping_scale"
+        ][env_ids[:, None], common_dof_ids]
+        effort_limits = self._torque_limits_common[common_dof_ids] * actuator_dr[
+            "effort_limit_scale"
+        ][env_ids[:, None], common_dof_ids]
+
+        if hasattr(self._robot, "write_joint_stiffness_to_sim_index"):
+            self._robot.write_joint_stiffness_to_sim_index(
+                stiffness=stiffness,
+                joint_ids=simulator_dof_ids,
+                env_ids=env_ids,
+            )
+            self._robot.write_joint_damping_to_sim_index(
+                damping=damping, joint_ids=simulator_dof_ids, env_ids=env_ids
+            )
+            self._robot.write_joint_effort_limit_to_sim_index(
+                limits=effort_limits,
+                joint_ids=simulator_dof_ids,
+                env_ids=env_ids,
+            )
+        else:
+            # IsaacLab <= 2.2 exposes the same operations without the _index
+            # suffix. Keep this path until supported deployments converge.
+            self._robot.write_joint_stiffness_to_sim(
+                stiffness, joint_ids=simulator_dof_ids, env_ids=env_ids
+            )
+            self._robot.write_joint_damping_to_sim(
+                damping, joint_ids=simulator_dof_ids, env_ids=env_ids
+            )
+            self._robot.write_joint_effort_limit_to_sim(
+                effort_limits, joint_ids=simulator_dof_ids, env_ids=env_ids
+            )
 
     def _apply_scene_object_properties_after_spawn(
         self, all_env_ids: torch.Tensor

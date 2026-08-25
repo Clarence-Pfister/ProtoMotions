@@ -8,6 +8,8 @@ import torch
 
 from protomotions.simulator.base_simulator.config import (
     ActionNoiseDomainRandomizationConfig,
+    ActuatorDomainRandomizationConfig,
+    ControlLatencyDomainRandomizationConfig,
     CenterOfMassDomainRandomizationConfig,
     FrictionDomainRandomizationConfig,
     ProjectileConfig,
@@ -88,6 +90,44 @@ def test_simulator_config_matching_and_domain_randomization_validation():
     ]:
         with pytest.raises(ValueError, match=message):
             ActionNoiseDomainRandomizationConfig(**kwargs)
+
+    ActuatorDomainRandomizationConfig(
+        stiffness_scale_range=(0.9, 1.1),
+        damping_scale_range=(0.8, 1.2),
+        effort_limit_scale_range=(0.85, 1.15),
+        dof_names=[".*"],
+    )
+    for kwargs, message in [
+        ({"dof_names": [".*"], "dof_indices": [0]}, "Only one"),
+        ({}, "Either dof_names"),
+        (
+            {"dof_indices": [0], "stiffness_scale_range": (0.0, 1.0)},
+            "positive",
+        ),
+        (
+            {"dof_indices": [0], "damping_scale_range": (1.2, 0.8)},
+            "<=",
+        ),
+        (
+            {"dof_indices": [0], "effort_limit_scale_range": (1.0,)},
+            "exactly two",
+        ),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            ActuatorDomainRandomizationConfig(**kwargs)
+
+    ControlLatencyDomainRandomizationConfig(delay_steps_range=(0, 2))
+    for value_range, message in [
+        ((-1, 1), "non-negative"),
+        ((2, 1), "<="),
+        ((0.0, 1), "integers"),
+        ((False, 1), "integers"),
+        ((0,), "exactly two"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            ControlLatencyDomainRandomizationConfig(
+                delay_steps_range=value_range
+            )
 
     FrictionDomainRandomizationConfig(body_indices=[0])
     with pytest.raises(ValueError, match="Either body_names"):

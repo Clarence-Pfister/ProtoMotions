@@ -218,7 +218,9 @@ def main(
     duration_height_seconds: float = typer.Option(
         0.6, help="Duration in seconds for height filter"
     ),
-    robot_type: str = typer.Option("g1", help="Robot type"),
+    robot_type: str = typer.Option(
+        "g1", help="Robot type. Use 'g1_23dof' for 23-DOF G1 CSVs."
+    ),
     contact_labels_dir: Optional[Path] = typer.Option(
         None,
         help="Directory with contact label files (*_contacts.npz). If provided, use these for rigid_body_contacts.",
@@ -258,6 +260,7 @@ def main(
 
     robot_mjcf_mapping = {
         "g1": "g1_bm_box_feet.xml",
+        "g1_23dof": "g1_23dof_holo_compat.xml",
         "h1_2": "h1_2.xml",
     }
 
