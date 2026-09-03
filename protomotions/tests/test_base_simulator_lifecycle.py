@@ -11,6 +11,8 @@ import torch
 from protomotions.robot_configs.base import ControlType
 from protomotions.simulator.base_simulator.config import (
     ActionNoiseDomainRandomizationConfig,
+    ActuatorDomainRandomizationConfig,
+    ControlLatencyDomainRandomizationConfig,
     CenterOfMassDomainRandomizationConfig,
     DomainRandomizationConfig,
     FrictionDomainRandomizationConfig,
@@ -432,6 +434,7 @@ def test_simulator_control_modes_and_domain_randomization_helpers():
     proportional = _sim(scene_objects=0, control_type=ControlType.PROPORTIONAL)
     proportional._initialize_with_markers(None)
     proportional._common_actions[:] = torch.tensor([[2.0, -2.0], [0.5, 0.25]])
+    proportional._control_actions[:] = proportional._common_actions
     proportional._apply_control()
     assert len(proportional.torques) == 1
     assert proportional.torques[-1].shape == (2, 2)
@@ -440,6 +443,7 @@ def test_simulator_control_modes_and_domain_randomization_helpers():
     torque = _sim(scene_objects=0, control_type=ControlType.TORQUE)
     torque._initialize_with_markers(None)
     torque._common_actions[:] = torch.tensor([[100.0, -100.0], [0.5, -0.5]])
+    torque._control_actions[:] = torque._common_actions
     torque._apply_control()
     assert torch.equal(torque.torques[-1][0], torch.tensor([-6.0, 5.0]))
 
@@ -472,6 +476,74 @@ def test_simulator_control_modes_and_domain_randomization_helpers():
     original_actions = no_due._common_actions.clone()
     no_due._apply_accel_clamp()
     assert torch.equal(no_due._common_actions, original_actions)
+
+
+def test_actuator_scaling_and_control_latency():
+    actuator_cfg = DomainRandomizationConfig(
+        actuator=ActuatorDomainRandomizationConfig(
+            stiffness_scale_range=(0.5, 0.5),
+            damping_scale_range=(1.0, 1.0),
+            effort_limit_scale_range=(2.0, 2.0),
+            dof_indices=[0, 1],
+        )
+    )
+    proportional = _sim(
+        scene_objects=0,
+        control_type=ControlType.PROPORTIONAL,
+        domain_randomization=actuator_cfg,
+    )
+    proportional._initialize_with_markers(None)
+    proportional._control_actions[:] = 1.0
+    proportional._apply_control()
+
+    # Common-order torque for env 0 is [2.3, 9.8], then converted to sim order.
+    assert torch.allclose(
+        proportional.torques[-1][0], torch.tensor([9.8, 2.3]), atol=1e-6
+    )
+    actuator_dr = proportional._domain_randomization["actuator"]
+    assert torch.equal(
+        actuator_dr["stiffness_scale"], torch.full((2, 2), 0.5)
+    )
+    assert torch.equal(
+        actuator_dr["effort_limit_scale"], torch.full((2, 2), 2.0)
+    )
+
+    latency_cfg = DomainRandomizationConfig(
+        control_latency=ControlLatencyDomainRandomizationConfig(
+            delay_steps_range=(1, 1)
+        )
+    )
+    delayed = _sim(
+        scene_objects=0,
+        domain_randomization=latency_cfg,
+        pd_target_max_accel=None,
+    )
+    delayed._initialize_with_markers(None)
+    reset_state = ResetState(
+        root_pos=torch.ones(2, 3),
+        root_rot=_identity_quat(2),
+        root_vel=torch.zeros(2, 3),
+        root_ang_vel=torch.zeros(2, 3),
+        dof_pos=torch.tensor([[0.25, -0.5], [0.25, -0.5]]),
+        dof_vel=torch.zeros(2, 2),
+        state_conversion=StateConversion.COMMON,
+    )
+    delayed.reset_envs(reset_state)
+
+    first_actions = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    second_actions = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+    delayed.step(first_actions)
+    delayed.step(second_actions)
+
+    # The reset pose is held for the first delayed step. The second applies the
+    # first policy action. Both are converted from common to simulator order.
+    assert torch.equal(
+        delayed.pd_targets[-2], torch.tensor([[-0.5, 0.25], [-0.5, 0.25]])
+    )
+    assert torch.equal(
+        delayed.pd_targets[-1], torch.tensor([[2.0, 1.0], [4.0, 3.0]])
+    )
+    assert torch.equal(delayed.get_current_actions(), second_actions)
 
 
 def test_simulator_joint_limit_mismatch_raises():

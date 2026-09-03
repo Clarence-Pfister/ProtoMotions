@@ -604,8 +604,56 @@ def extract_control_info(
         if value is None:
             return None
         if isinstance(value, np.ndarray):
+            if value.size != 1:
+                return value
             value = value.item()
         return float(value)
+
+    def _as_optional_float(value, default_value):
+        """Convert MJCF scalar attributes to plain floats."""
+        if value is None:
+            return default_value
+        if isinstance(value, str):
+            return float(value)
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return default_value
+            if value.size == 1:
+                return float(value.reshape(-1)[0])
+            return value
+        if isinstance(value, np.generic):
+            return float(value)
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return default_value
+            if len(value) == 1:
+                return float(value[0])
+            return value
+        return value
+
+    def _as_effort_limit(value, default_value):
+        """Convert MJCF actuator force range to a positive effort limit."""
+        if value is None:
+            return default_value
+        if isinstance(value, str):
+            try:
+                values = [float(item) for item in value.split()]
+            except ValueError:
+                return default_value
+        elif isinstance(value, np.ndarray):
+            values = value.reshape(-1).tolist()
+        elif isinstance(value, np.generic):
+            return float(value)
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            return value
+
+        if len(values) == 0:
+            return default_value
+        if len(values) == 1:
+            return float(values[0])
+        return float(values[1])
 
     def _extract_joint_control_params(joint_name, joint):
         """Extract control parameters from a joint element."""
@@ -619,30 +667,11 @@ def extract_control_info(
         # Extract actuator force range if available
         effort_limit = getattr(joint, "actuatorfrcrange", DEFAULT_EFFORT_LIMIT)
 
-        # Convert to float if they're strings (common in MJCF)
-        if isinstance(stiffness, str):
-            stiffness = float(stiffness)
-        if isinstance(damping, str):
-            damping = float(damping)
-        if isinstance(armature, str):
-            armature = float(armature)
-        if isinstance(friction, str):
-            friction = float(friction)
-        if isinstance(effort_limit, str):
-            # Parse "min max" format
-            try:
-                _, max_val = map(float, effort_limit.split())
-                effort_limit = max_val
-            except ValueError:
-                effort_limit = DEFAULT_EFFORT_LIMIT
-        if isinstance(effort_limit, (list, tuple, np.ndarray)):
-            values = np.asarray(effort_limit).reshape(-1)
-            if values.size == 0:
-                effort_limit = DEFAULT_EFFORT_LIMIT
-            elif values.size == 1:
-                effort_limit = values[0]
-            else:
-                effort_limit = values[1]
+        stiffness = _as_optional_float(stiffness, DEFAULT_STIFFNESS)
+        damping = _as_optional_float(damping, DEFAULT_DAMPING)
+        armature = _as_optional_float(armature, DEFAULT_ARMATURE)
+        friction = _as_optional_float(friction, DEFAULT_FRICTION)
+        effort_limit = _as_effort_limit(effort_limit, DEFAULT_EFFORT_LIMIT)
 
         if override_control_info is not None:
             for (

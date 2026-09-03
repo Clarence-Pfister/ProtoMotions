@@ -111,6 +111,8 @@ class _MockHistorical:
         import torch
 
         self.processed_actions = torch.randn(num_envs, history_steps, num_dofs)
+        # Raw action history (previous_actions_factory with processed=False)
+        self.actions = torch.randn(num_envs, history_steps, num_dofs)
 
 
 class MockContext:

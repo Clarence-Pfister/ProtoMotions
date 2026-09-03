@@ -45,6 +45,8 @@ from protomotions.simulator.base_simulator.config import (
     SimulatorConfig,
     SimBodyOrdering,
     ActionNoiseDomainRandomizationConfig,
+    ActuatorDomainRandomizationConfig,
+    ControlLatencyDomainRandomizationConfig,
     FrictionDomainRandomizationConfig,
     ObjectAssetDomainRandomizationConfig,
     CenterOfMassDomainRandomizationConfig,
@@ -169,6 +171,10 @@ class Simulator(RecordingMixin, ABC):
             device=self.device,
             dtype=torch.float,
         )
+        # Policy action history remains undelayed. _control_actions is the
+        # target that reaches the simulated actuator after latency DR.
+        self._control_actions = torch.zeros_like(self._common_actions)
+        self._initialize_control_latency_buffers()
         # Steps since last reset per env, for skipping accel clamp on first 2 steps
         self._steps_since_reset = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long
@@ -268,6 +274,12 @@ class Simulator(RecordingMixin, ABC):
         # Use joint limits from KinematicInfo instead of simulator-specific ones
         # Verify that simulator-specific limits match the parsed ones
         self._verify_joint_limits()
+
+        # Built-in PD backends must write randomized gains into the simulator.
+        # Explicit controllers consume these scale tensors in _apply_control().
+        self._apply_actuator_domain_randomization(
+            torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        )
 
         # Initialize push randomization state
         self._init_push_randomization()
@@ -696,6 +708,8 @@ class Simulator(RecordingMixin, ABC):
         if self.config.pd_target_max_accel is not None:
             self._apply_accel_clamp()
 
+        self._control_actions = self._apply_control_latency(self._common_actions)
+
         self._steps_since_reset += 1
         self._physics_step()
 
@@ -731,11 +745,13 @@ class Simulator(RecordingMixin, ABC):
         """
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
+        reset_dof_pos = new_states.dof_pos.clone()
         new_states = new_states.convert_to_sim(self.data_conversion)
 
         self._previous_actions[env_ids] = 0.0
         self._prev_prev_actions[env_ids] = 0.0
         self._steps_since_reset[env_ids] = 0
+        self._reset_control_latency(env_ids, reset_dof_pos)
         if new_object_states is not None:
             if self.scene_lib.num_objects_per_scene > 0:
                 new_object_states = new_object_states.convert_to_sim(
@@ -744,6 +760,11 @@ class Simulator(RecordingMixin, ABC):
             else:
                 new_object_states = None
         self._set_simulator_env_state(new_states, new_object_states, env_ids)
+
+        actuator_dr = self._get_actuator_domain_randomization()
+        if actuator_dr is not None and actuator_dr["config"].resample_on_reset:
+            self._resample_actuator_domain_randomization(env_ids)
+            self._apply_actuator_domain_randomization(env_ids)
 
         # Reset push randomization state for reset environments
         if self._push_enabled:
@@ -1279,7 +1300,7 @@ class Simulator(RecordingMixin, ABC):
         from _physics_step() instead of branching on control_type themselves.
         """
         if self.control_type == ControlType.BUILT_IN_PD:
-            targets = self._common_actions
+            targets = self._control_actions
             if (
                 self._domain_randomization is not None
                 and "action_noise" in self._domain_randomization
@@ -1293,7 +1314,7 @@ class Simulator(RecordingMixin, ABC):
             self._apply_simulator_pd_targets(sim_targets)
 
         elif self.control_type == ControlType.PROPORTIONAL:
-            targets = self._common_actions
+            targets = self._control_actions
             if (
                 self._domain_randomization is not None
                 and "action_noise" in self._domain_randomization
@@ -1306,18 +1327,18 @@ class Simulator(RecordingMixin, ABC):
             common_dof_state = self._get_simulator_dof_state().convert_to_common(
                 self.data_conversion
             )
-            torques = (
-                self._common_p_gains * (targets - common_dof_state.dof_pos)
-                - self._common_d_gains * common_dof_state.dof_vel
+            p_gains, d_gains, torque_limits = (
+                self._get_effective_control_properties()
             )
-            torques = torch.clip(
-                torques, -self._torque_limits_common, self._torque_limits_common
+            torques = p_gains * (targets - common_dof_state.dof_pos) - d_gains * (
+                common_dof_state.dof_vel
             )
+            torques = torch.clamp(torques, -torque_limits, torque_limits)
             sim_torques = torques[:, self.data_conversion.dof_convert_to_sim]
             self._apply_simulator_torques(sim_torques)
 
         elif self.control_type == ControlType.TORQUE:
-            torques = self._common_actions
+            torques = self._control_actions
 
             if (
                 self._domain_randomization is not None
@@ -1328,9 +1349,8 @@ class Simulator(RecordingMixin, ABC):
                     ..., self._domain_randomization["action_noise"]["dof_indices"]
                 ] += self._domain_randomization["action_noise"]["action_noise"]
 
-            torques = torch.clip(
-                torques, -self._torque_limits_common, self._torque_limits_common
-            )
+            _, _, torque_limits = self._get_effective_control_properties()
+            torques = torch.clamp(torques, -torque_limits, torque_limits)
             sim_torques = torques[:, self.data_conversion.dof_convert_to_sim]
             self._apply_simulator_torques(sim_torques)
 
@@ -1386,6 +1406,92 @@ class Simulator(RecordingMixin, ABC):
         self._common_d_gains = d_gains
         self._torque_limits_common = dof_effort_limits
 
+    def _get_actuator_domain_randomization(self) -> Optional[Dict[str, Any]]:
+        if self._domain_randomization is None:
+            return None
+        return self._domain_randomization.get("actuator")
+
+    def _get_effective_control_properties(
+        self,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return per-environment gains and effort limits after actuator DR."""
+        actuator_dr = self._get_actuator_domain_randomization()
+        if actuator_dr is None:
+            return (
+                self._common_p_gains,
+                self._common_d_gains,
+                self._torque_limits_common,
+            )
+        return (
+            self._common_p_gains * actuator_dr["stiffness_scale"],
+            self._common_d_gains * actuator_dr["damping_scale"],
+            self._torque_limits_common * actuator_dr["effort_limit_scale"],
+        )
+
+    def _apply_actuator_domain_randomization(self, env_ids: torch.Tensor) -> None:
+        """Apply actuator DR that cannot be handled in the base controller.
+
+        Explicit PD and torque modes consume the sampled scales directly. A
+        simulator using built-in PD must override this hook so gains are not
+        silently ignored.
+        """
+        if self._get_actuator_domain_randomization() is None:
+            return
+        if self.control_type == ControlType.BUILT_IN_PD:
+            raise NotImplementedError(
+                f"{type(self).__name__} must implement built-in PD actuator "
+                "domain randomization."
+            )
+
+    def _initialize_control_latency_buffers(self) -> None:
+        latency_dr = None
+        if self._domain_randomization is not None:
+            latency_dr = self._domain_randomization.get("control_latency")
+        self._control_latency_buffer = None
+        if latency_dr is None:
+            return
+        max_delay = latency_dr["config"].delay_steps_range[1]
+        self._control_latency_buffer = torch.zeros(
+            max_delay + 1,
+            self.num_envs,
+            self.robot_config.number_of_actions,
+            device=self.device,
+            dtype=torch.float,
+        )
+
+    def _apply_control_latency(self, actions: torch.Tensor) -> torch.Tensor:
+        latency_dr = None
+        if self._domain_randomization is not None:
+            latency_dr = self._domain_randomization.get("control_latency")
+        if latency_dr is None:
+            return actions
+
+        if self._control_latency_buffer.shape[0] > 1:
+            self._control_latency_buffer[1:] = self._control_latency_buffer[
+                :-1
+            ].clone()
+        self._control_latency_buffer[0] = actions
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        return self._control_latency_buffer[latency_dr["delay_steps"], env_ids]
+
+    def _reset_control_latency(
+        self, env_ids: torch.Tensor, reset_dof_pos: torch.Tensor
+    ) -> None:
+        latency_dr = None
+        if self._domain_randomization is not None:
+            latency_dr = self._domain_randomization.get("control_latency")
+        if latency_dr is None:
+            self._control_actions[env_ids] = reset_dof_pos
+            return
+
+        if latency_dr["config"].resample_on_reset:
+            self._resample_control_latency(env_ids)
+        seed_actions = reset_dof_pos
+        if self.control_type == ControlType.TORQUE:
+            seed_actions = torch.zeros_like(reset_dof_pos)
+        self._control_latency_buffer[:, env_ids] = seed_actions.unsqueeze(0)
+        self._control_actions[env_ids] = seed_actions
+
     def _process_domain_randomization(self) -> None:
         """
         Process domain randomization from the config.
@@ -1398,6 +1504,18 @@ class Simulator(RecordingMixin, ABC):
             domain_randomization_dict["action_noise"] = (
                 self._process_action_noise_domain_randomization(
                     self.config.domain_randomization.action_noise
+                )
+            )
+        if self.config.domain_randomization.actuator is not None:
+            domain_randomization_dict["actuator"] = (
+                self._process_actuator_domain_randomization(
+                    self.config.domain_randomization.actuator
+                )
+            )
+        if self.config.domain_randomization.control_latency is not None:
+            domain_randomization_dict["control_latency"] = (
+                self._process_control_latency_domain_randomization(
+                    self.config.domain_randomization.control_latency
                 )
             )
         if self.config.domain_randomization.friction is not None:
@@ -1444,6 +1562,103 @@ class Simulator(RecordingMixin, ABC):
 
         noise_dict = {"dof_indices": dof_indices, "action_noise": action_noise}
         return noise_dict
+
+    @staticmethod
+    def _sample_uniform_scale(
+        value_range: Tuple[float, float],
+        shape: Tuple[int, int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        low, high = value_range
+        if low == high:
+            return torch.full(shape, low, device=device, dtype=torch.float)
+        return torch.rand(*shape, device=device) * (high - low) + low
+
+    def _process_actuator_domain_randomization(
+        self, domain_randomization: ActuatorDomainRandomizationConfig
+    ) -> Dict[str, Any]:
+        dof_indices = get_matching_indices(
+            self.robot_config.kinematic_info.dof_names,
+            domain_randomization.dof_names,
+            domain_randomization.dof_indices,
+        )
+        if len(dof_indices) == 0:
+            raise ValueError("Actuator domain randomization matched no DOFs.")
+        actuator_dr = {
+            "config": domain_randomization,
+            "dof_indices": dof_indices,
+            "stiffness_scale": torch.ones(
+                self.num_envs, self._num_dof, device=self.device
+            ),
+            "damping_scale": torch.ones(
+                self.num_envs, self._num_dof, device=self.device
+            ),
+            "effort_limit_scale": torch.ones(
+                self.num_envs, self._num_dof, device=self.device
+            ),
+        }
+        self._resample_actuator_domain_randomization(
+            torch.arange(self.num_envs, device=self.device), actuator_dr
+        )
+        return actuator_dr
+
+    def _resample_actuator_domain_randomization(
+        self,
+        env_ids: torch.Tensor,
+        actuator_dr: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if actuator_dr is None:
+            actuator_dr = self._get_actuator_domain_randomization()
+        if actuator_dr is None or len(env_ids) == 0:
+            return
+        config = actuator_dr["config"]
+        dof_indices = actuator_dr["dof_indices"]
+        shape = (len(env_ids), len(dof_indices))
+        for tensor_name, range_name in (
+            ("stiffness_scale", "stiffness_scale_range"),
+            ("damping_scale", "damping_scale_range"),
+            ("effort_limit_scale", "effort_limit_scale_range"),
+        ):
+            actuator_dr[tensor_name][env_ids[:, None], dof_indices] = (
+                self._sample_uniform_scale(
+                    getattr(config, range_name), shape, self.device
+                )
+            )
+
+    def _process_control_latency_domain_randomization(
+        self, domain_randomization: ControlLatencyDomainRandomizationConfig
+    ) -> Dict[str, Any]:
+        latency_dr = {
+            "config": domain_randomization,
+            "delay_steps": torch.zeros(
+                self.num_envs, device=self.device, dtype=torch.long
+            ),
+        }
+        self._resample_control_latency(
+            torch.arange(self.num_envs, device=self.device), latency_dr
+        )
+        return latency_dr
+
+    def _resample_control_latency(
+        self,
+        env_ids: torch.Tensor,
+        latency_dr: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if latency_dr is None:
+            latency_dr = (
+                None
+                if self._domain_randomization is None
+                else self._domain_randomization.get("control_latency")
+            )
+        if latency_dr is None or len(env_ids) == 0:
+            return
+        delay_min, delay_max = latency_dr["config"].delay_steps_range
+        latency_dr["delay_steps"][env_ids] = torch.randint(
+            delay_min,
+            delay_max + 1,
+            (len(env_ids),),
+            device=self.device,
+        )
 
     def _process_friction_domain_randomization(
         self, domain_randomization: FrictionDomainRandomizationConfig

@@ -120,6 +120,91 @@ class ActionNoiseDomainRandomizationConfig:
 
 
 @dataclass
+class ActuatorDomainRandomizationConfig:
+    """Multiplicative actuator-property randomization.
+
+    Scale factors are sampled independently for every selected DOF and
+    environment. Built-in PD backends apply the sampled values to the physics
+    engine; explicit PD and torque control apply them in the base controller.
+    """
+
+    stiffness_scale_range: Tuple[float, float] = field(
+        default=(1.0, 1.0),
+        metadata={"help": "Multiplicative range for joint stiffness."},
+    )
+    damping_scale_range: Tuple[float, float] = field(
+        default=(1.0, 1.0),
+        metadata={"help": "Multiplicative range for joint damping."},
+    )
+    effort_limit_scale_range: Tuple[float, float] = field(
+        default=(1.0, 1.0),
+        metadata={"help": "Multiplicative range for joint effort limits."},
+    )
+    dof_names: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "DOF names to randomize (regex patterns)."},
+    )
+    dof_indices: Optional[List[int]] = field(
+        default=None, metadata={"help": "DOF indices to randomize."}
+    )
+    resample_on_reset: bool = field(
+        default=True,
+        metadata={"help": "Resample actuator properties on environment reset."},
+    )
+
+    def __post_init__(self):
+        if self.dof_names is not None and self.dof_indices is not None:
+            raise ValueError("Only one of dof_names or dof_indices must be provided.")
+        if self.dof_names is None and self.dof_indices is None:
+            raise ValueError("Either dof_names or dof_indices must be provided.")
+
+        for field_name in (
+            "stiffness_scale_range",
+            "damping_scale_range",
+            "effort_limit_scale_range",
+        ):
+            value_range = getattr(self, field_name)
+            if len(value_range) != 2:
+                raise ValueError(f"{field_name} must contain exactly two values.")
+            if value_range[0] <= 0 or value_range[1] <= 0:
+                raise ValueError(f"{field_name} values must be positive.")
+            if value_range[0] > value_range[1]:
+                raise ValueError(f"{field_name}[0] must be <= {field_name}[1].")
+
+
+@dataclass
+class ControlLatencyDomainRandomizationConfig:
+    """Randomize integer control delay independently for each environment."""
+
+    delay_steps_range: Tuple[int, int] = field(
+        default=(0, 0),
+        metadata={"help": "Inclusive control-step delay range, e.g. (0, 1)."},
+    )
+    resample_on_reset: bool = field(
+        default=True,
+        metadata={"help": "Resample the delay on environment reset."},
+    )
+
+    def __post_init__(self):
+        if len(self.delay_steps_range) != 2:
+            raise ValueError("delay_steps_range must contain exactly two values.")
+        delay_min, delay_max = self.delay_steps_range
+        if (
+            isinstance(delay_min, bool)
+            or isinstance(delay_max, bool)
+            or not isinstance(delay_min, int)
+            or not isinstance(delay_max, int)
+        ):
+            raise ValueError("delay_steps_range values must be integers.")
+        if delay_min < 0 or delay_max < 0:
+            raise ValueError("delay_steps_range values must be non-negative.")
+        if delay_min > delay_max:
+            raise ValueError(
+                "delay_steps_range[0] must be <= delay_steps_range[1]."
+            )
+
+
+@dataclass
 class FrictionDomainRandomizationConfig:
     """Configuration for friction domain randomization."""
 
@@ -505,6 +590,14 @@ class DomainRandomizationConfig:
 
     action_noise: Optional[ActionNoiseDomainRandomizationConfig] = field(
         default=None, metadata={"help": "Action noise configuration."}
+    )
+    actuator: Optional[ActuatorDomainRandomizationConfig] = field(
+        default=None,
+        metadata={"help": "Actuator gain and effort-limit randomization."},
+    )
+    control_latency: Optional[ControlLatencyDomainRandomizationConfig] = field(
+        default=None,
+        metadata={"help": "Control-step latency randomization."},
     )
     friction: Optional[FrictionDomainRandomizationConfig] = field(
         default=None, metadata={"help": "Friction randomization configuration."}

@@ -574,11 +574,11 @@ class MujocoSimulator(Simulator):
             return
 
         if self._has_free_joint:
-            q = self.data.qpos[7:]
-            qd = self.data.qvel[6:]
+            q = self.data.qpos[7 : 7 + self._num_actuated_dofs]
+            qd = self.data.qvel[6 : 6 + self._num_actuated_dofs]
         else:
-            q = self.data.qpos[:]
-            qd = self.data.qvel[:]
+            q = self.data.qpos[: self._num_actuated_dofs]
+            qd = self.data.qvel[: self._num_actuated_dofs]
 
         torques = self._kp_sim * (self._pd_targets_sim - q) - self._kd_sim * qd
         torques = np.clip(torques, -self._effort_limits_sim, self._effort_limits_sim)
@@ -809,9 +809,13 @@ class MujocoSimulator(Simulator):
         body_pos = self.data.xpos[1 : 1 + nb, :].copy()
         body_rot = self.data.xquat[1 : 1 + nb, :].copy()
 
-        # cvel is [ang_vel(3), lin_vel(3)]
+        # cvel is [ang_vel(3), lin_vel(3)] expressed at the kinematic subtree's
+        # COM anchor (c-frame), not the body origin. Shift the linear part to
+        # the body frame origin: v_origin = v_com + w x (xpos - subtree_com).
         body_ang_vel = self.data.cvel[1 : 1 + nb, 0:3].copy()
-        body_vel = self.data.cvel[1 : 1 + nb, 3:6].copy()
+        com_anchor = self.data.subtree_com[self.model.body_rootid[1 : 1 + nb], :]
+        r = self.data.xpos[1 : 1 + nb, :] - com_anchor
+        body_vel = self.data.cvel[1 : 1 + nb, 3:6] + np.cross(body_ang_vel, r)
 
         return RobotState(
             rigid_body_pos=_to_torch_f32(body_pos).unsqueeze(0),
