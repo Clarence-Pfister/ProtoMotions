@@ -1,3 +1,32 @@
+> ## Fork notice
+>
+> This is a fork of [NVlabs/ProtoMotions](https://github.com/NVlabs/ProtoMotions),
+> branched at upstream revision `49fe5ad6` with upstream history preserved.
+> **This branch (`main`) is that upstream snapshot** — it carries no project
+> work, only upstream plus a `.gitignore` rule for locally generated data.
+>
+> Project work lives on the feature branches:
+>
+> | Branch | What it adds |
+> |---|---|
+> | [`feature/g1-23dof`](../../tree/feature/g1-23dof) | Unitree G1 23DoF robot support — robot config, MJCF/USD assets, collision meshes, qpos→`.motion` converter. Commands: [`README_G1_23DOF.md`](../../blob/feature/g1-23dof/README_G1_23DOF.md). |
+> | [`feature/sim2real-tooling`](../../tree/feature/sim2real-tooling) | Sim2real tooling: `pose_lib` and MuJoCo simulator overlays, domain randomization, and sim2sim validation sweeps. |
+> | [`integration/all`](../../tree/integration/all) | Both features merged. **Check this out when you need both.** |
+>
+> The two feature branches touch disjoint sets of files, so `integration/all`
+> merges cleanly. Land new work on the feature branch it belongs to and merge
+> up — don't commit straight to `integration/all`.
+>
+> ```bash
+> # This fork shares ancestry with upstream, so upstream work merges normally:
+> git remote add upstream https://github.com/NVlabs/ProtoMotions.git
+> git fetch upstream && git merge upstream/main
+> ```
+>
+> Simulator backends in use here: **IsaacLab** (training) and **MuJoCo**
+> (sim2sim). Newton, IsaacGym and Genesis are unused — their upstream
+> requirements files are kept only to avoid diverging from upstream.
+
 <div align="center">
 
 # ProtoMotions 3

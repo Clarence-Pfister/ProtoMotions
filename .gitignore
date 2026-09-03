@@ -16,4 +16,6 @@ newton_source/*
 data/amass/*.pkl
 .cursor/
 renders/
+.venv_newton/
+data/
 .envrc
